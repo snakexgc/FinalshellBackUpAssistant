@@ -1,4 +1,4 @@
-# Finalshell 配置文件备份工具 v3.0
+# Finalshell 配置文件备份工具
 
 基于 WebDAV 云端存储的 Finalshell 配置文件备份工具。
 
@@ -97,9 +97,3 @@ ImportError: attempted relative import with no known parent package
 - requests >= 2.28.0
 - webdavclient3 >= 3.14.6
 - tkinter（Python 标准库）
-
-## 版本历史
-
-- v3.0 - 重构为模块化结构，支持 WebDAV 云端存储
-- v2.0 - 支持本地 zip 备份
-- v1.0 - 初始版本
