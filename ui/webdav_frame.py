@@ -66,7 +66,7 @@ class WebDAVFrame(ttk.LabelFrame):
         self.remember_config = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             config_frame,
-            text="记住当前配置（仅限本机使用）",
+            text="保存配置",
             variable=self.remember_config,
             command=self._on_remember_changed
         ).pack(side="left")
