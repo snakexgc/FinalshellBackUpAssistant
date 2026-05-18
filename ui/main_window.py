@@ -61,8 +61,7 @@ class MainWindow:
         self.webdav_frame = WebDAVFrame(
             self.root,
             on_connected=self._on_webdav_connected,
-            log_callback=self._log_message,
-            get_source_path_callback=self._get_source_path
+            log_callback=self._log_message
         )
         self.webdav_frame.pack(fill="x", padx=20, pady=10)
 
@@ -97,7 +96,7 @@ class MainWindow:
         scrollbar.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=scrollbar.set)
 
-        self._load_saved_config()
+        self._load_bundled_config()
 
     def _setup_logging(self):
         """设置日志"""
@@ -109,9 +108,9 @@ class MainWindow:
         self.log_handler = TextHandler(self.log_text)
         logging.getLogger().addHandler(self.log_handler)
 
-    def _load_saved_config(self):
-        """加载保存的配置"""
-        config = self.webdav_frame.load_saved_config()
+    def _load_bundled_config(self):
+        """加载内置配置"""
+        config = self.webdav_frame.load_bundled_config()
         if config:
             url, username, password, source_path = config
             if source_path:
@@ -123,10 +122,6 @@ class MainWindow:
         self.backup_frame.set_webdav_client(client)
         self.status_var.set("WebDAV已连接")
         self._log_message("WebDAV连接成功，可以开始备份操作")
-
-    def _get_source_path(self) -> str:
-        """获取源目录路径"""
-        return self.backup_frame.get_source_path()
 
     def _open_temp_dir(self):
         """打开临时目录"""

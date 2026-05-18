@@ -33,9 +33,21 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
+      - name: Create default bundled config
+        shell: pwsh
+        run: |
+          $config = [ordered]@{
+            url = "https://dav.jianguoyun.com/dav/"
+            username = ""
+            password = ""
+            source_path = "D:/finalshell"
+          }
+
+          $config | ConvertTo-Json | Set-Content -Path "config.json" -Encoding utf8
+
       - name: Build executable
         run: |
-          pyinstaller --onefile --windowed --name "FinalshellBackUpAssistant" main.py
+          pyinstaller --onefile --windowed --name "FinalshellBackUpAssistant" --add-data "config.json;." main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -73,6 +85,7 @@ jobs:
             ### 下载说明
             - 下载 `FinalshellBackUpAssistant.exe` 文件即可使用
             - 无需安装 Python 环境
+            - 公开发行版内置坚果云默认地址，用户名和密码为空
             
             ### 更新内容
             请查看提交记录了解详细更新内容。
