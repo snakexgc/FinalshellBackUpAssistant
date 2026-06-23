@@ -12,6 +12,7 @@ from tkinter import ttk
 from core import WebDAVClient
 from .webdav_frame import WebDAVFrame
 from .backup_frame import BackupFrame
+from .decrypt_frame import DecryptFrame
 
 
 TEMP_DIR_NAME = "temfsbup"
@@ -23,8 +24,8 @@ class MainWindow:
     def __init__(self):
         """初始化主窗口"""
         self.root = tk.Tk()
-        self.root.title("Finalshell配置文件备份工具 v3.0")
-        self.root.geometry("800x900")
+        self.root.title("FinalShell 配置备份与解密工具 v3.1")
+        self.root.geometry("1050x900")
 
         self.webdav_client: WebDAVClient = None
         self.temp_dir = self._init_temp_dir()
@@ -58,14 +59,18 @@ class MainWindow:
 
     def _create_widgets(self):
         """创建界面组件"""
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        self.backup_page = ttk.Frame(self.notebook)
+
         self.webdav_frame = WebDAVFrame(
-            self.root,
+            self.backup_page,
             on_connected=self._on_webdav_connected,
             log_callback=self._log_message
         )
         self.webdav_frame.pack(fill="x", padx=20, pady=10)
 
-        temp_frame = ttk.LabelFrame(self.root, text="本地临时目录")
+        temp_frame = ttk.LabelFrame(self.backup_page, text="本地临时目录")
         temp_frame.pack(padx=20, pady=5, fill="x")
 
         self.temp_path_var = tk.StringVar(value=self.temp_dir)
@@ -77,16 +82,16 @@ class MainWindow:
         )
 
         self.backup_frame = BackupFrame(
-            self.root,
+            self.backup_page,
             log_callback=self._log_message
         )
         self.backup_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
         self.status_var = tk.StringVar(value="就绪")
-        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, background="lightgray")
+        self.status_bar = ttk.Label(self.backup_page, textvariable=self.status_var, background="lightgray")
         self.status_bar.pack(fill="x", padx=20, pady=5)
 
-        log_frame = ttk.LabelFrame(self.root, text="操作日志")
+        log_frame = ttk.LabelFrame(self.backup_page, text="操作日志")
         log_frame.pack(padx=20, pady=10, fill="both", expand=True)
 
         self.log_text = tk.Text(log_frame, height=8, state="disabled")
@@ -96,6 +101,9 @@ class MainWindow:
         scrollbar.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        self.decrypt_frame = DecryptFrame(self.notebook)
+        self.notebook.add(self.backup_page, text="备份恢复")
+        self.notebook.add(self.decrypt_frame, text="解密")
         self._load_bundled_config()
 
     def _setup_logging(self):

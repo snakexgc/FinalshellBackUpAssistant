@@ -28,18 +28,16 @@ class BackupManager:
         self.temp_dir = temp_dir or tempfile.mkdtemp()
         self.logger = logging.getLogger(__name__)
 
-    def get_backup_filename(self, backup_type: str) -> str:
+    def get_backup_filename(self) -> str:
         """
         生成备份文件名
 
         Args:
-            backup_type: 备份类型
-
         Returns:
             备份文件名
         """
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        return f"{timestamp}_{backup_type}.zip"
+        return f"{timestamp}.zip"
 
     def _add_to_zip(self, zipf: zipfile.ZipFile, src_config: Optional[str], 
                     src_conn: Optional[str], conn_prefix: str = 'conn') -> int:
@@ -90,7 +88,7 @@ class BackupManager:
             if not os.path.exists(src_conn):
                 return False, "源目录中找不到conn文件夹"
 
-            backup_filename = self.get_backup_filename("完整备份")
+            backup_filename = self.get_backup_filename()
             local_backup_path = os.path.join(self.temp_dir, backup_filename)
 
             if progress_callback:
@@ -121,8 +119,9 @@ class BackupManager:
                                include_config: bool,
                                progress_callback: Optional[Callable] = None) -> Tuple[bool, str]:
         """
-        本地优先备份：以选中的云端包为基准，用本地的config.json和conn替换掉基准包中的文件，
-        同名文件直接用本地的替换掉
+        本地优先备份：先下载选中的云端包作为基准。勾选配置文件时，
+        用本地 config.json 替换基准包中的配置；conn 下的本地文件会替换
+        基准包中的同名文件，并补充本地独有文件。
 
         Args:
             source_path: Finalshell安装目录
@@ -140,7 +139,7 @@ class BackupManager:
             if not os.path.exists(src_conn):
                 return False, "源目录中找不到conn文件夹"
 
-            backup_filename = self.get_backup_filename("本地优先备份")
+            backup_filename = self.get_backup_filename()
             local_backup_path = os.path.join(self.temp_dir, backup_filename)
             base_zip_path = os.path.join(self.temp_dir, f"base_{base_filename}")
 
@@ -219,8 +218,9 @@ class BackupManager:
                               include_config: bool,
                               progress_callback: Optional[Callable] = None) -> Tuple[bool, str]:
         """
-        云端优先备份：以选中的云端包为基准，用本地的config.json和conn替换掉基准包中的文件，
-        同名文件以云端中的为准，不要替换
+        云端优先备份：先下载选中的云端包作为基准。勾选配置文件时保留
+        基准包中的 config.json，不用本地配置替换；conn 下的同名文件也保留
+        云端版本，仅补充本地独有文件。
 
         Args:
             source_path: Finalshell安装目录
@@ -238,7 +238,7 @@ class BackupManager:
             if not os.path.exists(src_conn):
                 return False, "源目录中找不到conn文件夹"
 
-            backup_filename = self.get_backup_filename("云端优先备份")
+            backup_filename = self.get_backup_filename()
             local_backup_path = os.path.join(self.temp_dir, backup_filename)
             base_zip_path = os.path.join(self.temp_dir, f"base_{base_filename}")
 
@@ -362,8 +362,8 @@ class BackupManager:
                                 include_config: bool,
                                 progress_callback: Optional[Callable] = None) -> Tuple[bool, str]:
         """
-        云端优先恢复：以选中的云端包为基准，用云端的config.json和conn替换掉基准包中的文件，
-        同名文件直接用本地的替换掉，不同名则新增进去
+        云端优先恢复：用云端包中的 config.json 和 conn 文件覆盖本地同名文件，
+        本地独有的文件保留不变。
 
         Args:
             filename: 备份文件名
@@ -401,19 +401,10 @@ class BackupManager:
                 if conn_files:
                     os.makedirs(dst_conn, exist_ok=True)
 
-                    local_conn_files = set()
-                    if os.path.exists(dst_conn):
-                        for root, dirs, files in os.walk(dst_conn):
-                            for file in files:
-                                file_path = os.path.join(root, file)
-                                rel_path = os.path.relpath(file_path, dst_conn)
-                                local_conn_files.add(rel_path.replace('\\', '/'))
-
                     for file_path in conn_files:
                         rel_path = file_path[5:]
-                        if rel_path not in local_conn_files:
-                            zipf.extract(file_path, os.path.dirname(dst_conn))
-                            self.logger.info(f"新增文件: {rel_path}")
+                        zipf.extract(file_path, os.path.dirname(dst_conn))
+                        self.logger.info(f"恢复并覆盖文件: {rel_path}")
 
             self._cleanup_temp_files([local_zip_path])
             return True, "恢复成功"

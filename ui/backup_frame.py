@@ -270,7 +270,7 @@ class BackupFrame(ttk.Frame):
             filename = file_info['filename']
             size_mb = file_info['size'] / (1024 * 1024)
 
-            backup_type = "未知"
+            backup_type = "备份"
             if "完整备份" in filename:
                 backup_type = "完整备份"
             elif "本地优先备份" in filename:

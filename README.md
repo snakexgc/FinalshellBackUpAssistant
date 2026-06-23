@@ -5,10 +5,11 @@
 ## 功能特性
 
 - **WebDAV 云端存储** - 支持将备份文件存储到 WebDAV 服务器
-- **增量备份** - 基于已有备份进行增量更新
-- **覆盖备份** - 完整打包当前配置进行备份
+- **本地完整备份** - 完整打包当前配置进行备份
+- **本地/云端优先备份** - 基于已有云端备份，按选定策略合并本地文件
 - **云端恢复** - 从 WebDAV 下载备份并恢复
 - **备份管理** - 查看、删除云端备份文件
+- **连接密码解密** - 选择单个 JSON 或整个 `conn` 文件夹，显示可复制的连接信息和解密后的密码
 
 ## 项目结构
 
@@ -19,12 +20,14 @@ FinalshellBackUpAssistant/
 ├── core/                   # 核心模块
 │   ├── __init__.py
 │   ├── webdav_client.py    # WebDAV客户端封装
-│   └── backup_manager.py   # 备份管理逻辑
+│   ├── backup_manager.py   # 备份管理逻辑
+│   └── finalshell_decryptor.py # FinalShell密码解密逻辑
 ├── ui/                     # 界面模块
 │   ├── __init__.py
 │   ├── main_window.py      # 主窗口
 │   ├── webdav_frame.py     # WebDAV配置面板
-│   └── backup_frame.py     # 备份操作面板
+│   ├── backup_frame.py     # 备份操作面板
+│   └── decrypt_frame.py    # 配置解密面板
 └── utils/                  # 工具模块
     ├── __init__.py
     └── logger.py           # 日志工具
@@ -32,8 +35,7 @@ FinalshellBackUpAssistant/
 
 ## 备份文件命名规则
 
-- 增量备份：`年月日时分秒_增量备份.zip`
-- 覆盖备份：`年月日时分秒_覆盖备份.zip`
+- 所有备份：`YYYYMMDDHHMMSS.zip`
 
 
 ### WebDAV 目录结构
