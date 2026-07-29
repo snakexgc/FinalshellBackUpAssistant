@@ -4,6 +4,8 @@ WebDAV客户端模块 - 使用 webdavclient3 库封装WebDAV操作
 
 import os
 import logging
+import posixpath
+from pathlib import PurePosixPath
 from typing import Optional, Callable
 from webdav3.client import Client
 from webdav3.exceptions import WebDavException
@@ -11,6 +13,8 @@ from webdav3.exceptions import WebDavException
 
 class WebDAVClient:
     """WebDAV客户端封装"""
+
+    TIMEOUT_SECONDS = 10
 
     def __init__(self, base_url: str, username: str, password: str,
                  log_callback: Optional[Callable] = None):
@@ -28,8 +32,10 @@ class WebDAVClient:
         self.password = password
         self.connected = False
         self.remote_path = "Finalshell_BackUp"
+        self.sync_remote_path = f"{self.remote_path}/sync"
         self.client: Optional[Client] = None
         self.log_callback = log_callback
+        self._known_directories: set[str] = set()
         # 缓存文件列表（用于不支持 list 方法的 WebDAV）
         self._cached_files: list = []
 
@@ -91,16 +97,18 @@ class WebDAVClient:
                 'webdav_hostname': self.base_url,
                 'webdav_login': self.username,
                 'webdav_password': self.password,
-                'disable_check': True,
+                'webdav_timeout': self.TIMEOUT_SECONDS,
             }
 
             self.client = Client(options)
 
             self._log("验证连接...")
-            self.client.check('/')
+            if not self.client.check('/'):
+                raise RuntimeError("WebDAV根目录不可访问")
 
             self._log(f"确保备份目录存在: {self.remote_path}")
-            self._ensure_directory_exists(self.remote_path)
+            if not self._ensure_directory_exists(self.remote_path):
+                raise RuntimeError(f"无法访问或创建备份目录: {self.remote_path}")
 
             self.connected = True
             self._log("WebDAV连接成功")
@@ -120,21 +128,158 @@ class WebDAVClient:
         确保远程目录存在
         
         Returns:
-            True 如果目录已存在，False 如果是新创建的
+            目录存在或创建成功时返回 True
         """
+        if path in self._known_directories:
+            return True
+
         try:
             self.client.list(path)
+            self._known_directories.add(path)
             self._log(f"目录已存在: {path}")
             return True
         except Exception:
             try:
                 self.client.mkdir(path)
+                self._known_directories.add(path)
                 self._log(f"目录已创建: {path}")
-                return False
+                return True
             except Exception as e:
                 error_msg = f"创建目录失败: {self._parse_error(e)}"
                 self._log(error_msg, "error")
                 return False
+
+    @staticmethod
+    def _normalize_remote_path(remote_path: str) -> str:
+        """将远程路径规范化为 WebDAV 使用的 POSIX 相对路径。"""
+        normalized = posixpath.normpath(remote_path.replace("\\", "/")).strip("/")
+        if not normalized or normalized == "." or normalized.startswith("../"):
+            raise ValueError(f"无效的远程路径: {remote_path}")
+        return normalized
+
+    def ensure_remote_directory(self, remote_path: str) -> tuple[bool, str]:
+        """逐级确保指定 WebDAV 目录存在。"""
+        if not self.client or not self.connected:
+            return False, "WebDAV未连接"
+
+        try:
+            normalized = self._normalize_remote_path(remote_path)
+            current = ""
+            for part in normalized.split("/"):
+                current = posixpath.join(current, part)
+                if not self._ensure_directory_exists(current):
+                    return False, f"无法访问或创建目录: {current}"
+            return True, "目录已就绪"
+        except Exception as error:
+            message = f"准备远程目录失败: {self._parse_error(error)}"
+            self._log(message, "error")
+            return False, message
+
+    def list_remote_tree(
+        self, remote_path: str
+    ) -> tuple[bool, str, dict[str, dict], set[str]]:
+        """
+        递归列出远程目录。
+
+        Returns:
+            (success, message, files, directories)，文件和目录均以 remote_path
+            为基准使用 POSIX 相对路径。
+        """
+        if not self.client or not self.connected:
+            return False, "WebDAV未连接", {}, set()
+
+        try:
+            normalized = self._normalize_remote_path(remote_path)
+            files: dict[str, dict] = {}
+            directories: set[str] = set()
+            pending = [(normalized, "")]
+
+            while pending:
+                current_remote, current_relative = pending.pop()
+                entries = self.client.list(current_remote, get_info=True)
+                for entry in entries:
+                    raw_path = str(entry.get("path") or "").rstrip("/")
+                    name = PurePosixPath(raw_path).name
+                    if not name:
+                        name = str(entry.get("name") or "").strip("/")
+                    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+                        continue
+
+                    relative_path = posixpath.join(current_relative, name)
+                    if entry.get("isdir"):
+                        if relative_path not in directories:
+                            directories.add(relative_path)
+                            pending.append(
+                                (posixpath.join(current_remote, name), relative_path)
+                            )
+                    else:
+                        files[relative_path] = entry
+
+            return True, "远程目录读取成功", files, directories
+        except Exception as error:
+            message = f"读取远程目录失败: {self._parse_error(error)}"
+            self._log(message, "error")
+            return False, message, {}, set()
+
+    def upload_path(self, local_path: str, remote_path: str) -> tuple[bool, str]:
+        """上传文件到指定远程完整路径。"""
+        if not self.client or not self.connected:
+            return False, "WebDAV未连接"
+
+        normalized = ""
+        try:
+            normalized = self._normalize_remote_path(remote_path)
+            self.client.upload_sync(remote_path=normalized, local_path=local_path)
+            self._log(f"同步上传成功: {normalized}")
+            return True, "上传成功"
+        except Exception as error:
+            if normalized:
+                self._forget_remote_directory(posixpath.dirname(normalized))
+            message = f"同步上传失败: {self._parse_error(error)}"
+            self._log(message, "error")
+            return False, message
+
+    def download_path(self, remote_path: str, local_path: str) -> tuple[bool, str]:
+        """从指定远程完整路径下载文件。"""
+        if not self.client or not self.connected:
+            return False, "WebDAV未连接"
+
+        try:
+            normalized = self._normalize_remote_path(remote_path)
+            self.client.download_sync(remote_path=normalized, local_path=local_path)
+            self._log(f"同步下载成功: {normalized}")
+            return True, "下载成功"
+        except Exception as error:
+            message = f"同步下载失败: {self._parse_error(error)}"
+            self._log(message, "error")
+            return False, message
+
+    def delete_path(self, remote_path: str) -> tuple[bool, str]:
+        """删除指定远程文件或目录。"""
+        if not self.client or not self.connected:
+            return False, "WebDAV未连接"
+
+        try:
+            normalized = self._normalize_remote_path(remote_path)
+            self.client.clean(normalized)
+            self._forget_remote_directory(normalized)
+            self._log(f"同步删除成功: {normalized}")
+            return True, "删除成功"
+        except Exception as error:
+            message = f"同步删除失败: {self._parse_error(error)}"
+            self._log(message, "error")
+            return False, message
+
+    def _forget_remote_directory(self, remote_path: str) -> None:
+        """清除目录缓存，使失败后的重试会重新确认远程目录。"""
+        if not remote_path:
+            return
+        prefix = remote_path.rstrip("/") + "/"
+        self._known_directories = {
+            path
+            for path in self._known_directories
+            if path != remote_path and not path.startswith(prefix)
+        }
 
     def _get_remote_path(self, filename: str) -> str:
         """获取远程文件完整路径"""

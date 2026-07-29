@@ -10,9 +10,11 @@ import tkinter as tk
 from tkinter import ttk
 
 from core import WebDAVClient
+from utils import ConfigManager
 from .webdav_frame import WebDAVFrame
 from .backup_frame import BackupFrame
 from .decrypt_frame import DecryptFrame
+from .sync_frame import SyncFrame
 
 
 TEMP_DIR_NAME = "temfsbup"
@@ -24,14 +26,22 @@ class MainWindow:
     def __init__(self):
         """初始化主窗口"""
         self.root = tk.Tk()
-        self.root.title("FinalShell 配置备份与解密工具 v3.1")
+        self.root.title("FinalShell 配置备份、同步与解密工具 v3.2")
         self.root.geometry("1050x900")
 
         self.webdav_client: WebDAVClient = None
         self.temp_dir = self._init_temp_dir()
+        self.config_manager = ConfigManager()
+        self.webdav_url = tk.StringVar(value="https://dav.jianguoyun.com/dav/")
+        self.webdav_username = tk.StringVar()
+        self.webdav_password = tk.StringVar()
+        self.source_path = tk.StringVar(value="D:/finalshell")
+        self._config_was_loaded = self._load_saved_config()
 
         self._create_widgets()
         self._setup_logging()
+        if self._config_was_loaded:
+            self._log_message("已从程序同级配置 JSON 加载上次保存的设置")
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -66,7 +76,11 @@ class MainWindow:
         self.webdav_frame = WebDAVFrame(
             self.backup_page,
             on_connected=self._on_webdav_connected,
-            log_callback=self._log_message
+            log_callback=self._log_message,
+            url_variable=self.webdav_url,
+            username_variable=self.webdav_username,
+            password_variable=self.webdav_password,
+            save_callback=self._save_config,
         )
         self.webdav_frame.pack(fill="x", padx=20, pady=10)
 
@@ -83,7 +97,8 @@ class MainWindow:
 
         self.backup_frame = BackupFrame(
             self.backup_page,
-            log_callback=self._log_message
+            log_callback=self._log_message,
+            source_variable=self.source_path,
         )
         self.backup_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
@@ -101,10 +116,19 @@ class MainWindow:
         scrollbar.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        self.sync_frame = SyncFrame(
+            self.notebook,
+            url_variable=self.webdav_url,
+            username_variable=self.webdav_username,
+            password_variable=self.webdav_password,
+            source_variable=self.source_path,
+            save_callback=self._save_config,
+        )
         self.decrypt_frame = DecryptFrame(self.notebook)
+        self.notebook.add(self.sync_frame, text="同步")
         self.notebook.add(self.backup_page, text="备份恢复")
         self.notebook.add(self.decrypt_frame, text="解密")
-        self._load_bundled_config()
+        self.notebook.select(self.sync_frame)
 
     def _setup_logging(self):
         """设置日志"""
@@ -116,13 +140,31 @@ class MainWindow:
         self.log_handler = TextHandler(self.log_text)
         logging.getLogger().addHandler(self.log_handler)
 
-    def _load_bundled_config(self):
-        """加载内置配置"""
-        config = self.webdav_frame.load_bundled_config()
-        if config:
-            url, username, password, source_path = config
-            if source_path:
-                self.backup_frame.set_source_path(source_path)
+    def _load_saved_config(self) -> bool:
+        """加载程序同级 JSON 中上次保存的设置。"""
+        config = self.config_manager.load_config()
+        if not config:
+            return False
+
+        url, username, password, source_path = config
+        if url:
+            self.webdav_url.set(url)
+        self.webdav_username.set(username)
+        self.webdav_password.set(password)
+        if source_path:
+            self.source_path.set(source_path)
+        return True
+
+    def _save_config(
+        self, url: str, username: str, password: str
+    ) -> tuple[bool, str]:
+        """保存两页共用的 WebDAV 设置和 FinalShell 路径。"""
+        return self.config_manager.save_config(
+            url,
+            username,
+            password,
+            self.source_path.get(),
+        )
 
     def _on_webdav_connected(self, client: WebDAVClient):
         """WebDAV连接成功回调"""
@@ -142,10 +184,11 @@ class MainWindow:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.config(state="disabled")
         self.log_text.see(tk.END)
-        self.root.update()
+        self.root.update_idletasks()
 
     def _on_closing(self):
         """窗口关闭时的处理"""
+        self.sync_frame.cleanup()
         self._cleanup_temp_dir()
         self.root.destroy()
 

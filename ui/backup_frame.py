@@ -15,7 +15,8 @@ class BackupFrame(ttk.Frame):
     """备份操作面板"""
 
     def __init__(self, master, webdav_client: Optional[WebDAVClient] = None,
-                 log_callback: Optional[Callable] = None, **kwargs):
+                 log_callback: Optional[Callable] = None,
+                 source_variable: Optional[tk.StringVar] = None, **kwargs):
         """
         初始化备份操作面板
 
@@ -29,6 +30,7 @@ class BackupFrame(ttk.Frame):
         self.webdav_client = webdav_client
         self.log_callback = log_callback
         self.backup_manager: Optional[BackupManager] = None
+        self.source_path = source_variable or tk.StringVar(value="D:/finalshell")
 
         self._create_widgets()
 
@@ -37,7 +39,6 @@ class BackupFrame(ttk.Frame):
         source_frame = ttk.LabelFrame(self, text="源目录 (Finalshell安装目录)")
         source_frame.pack(padx=10, pady=5, fill="x")
 
-        self.source_path = tk.StringVar(value="D:/finalshell")
         self.source_entry = ttk.Entry(source_frame, textvariable=self.source_path)
         self.source_entry.pack(side="left", padx=5, pady=5, fill="x", expand=True)
         self.browse_btn = ttk.Button(source_frame, text="浏览...", command=self._select_source)
@@ -190,7 +191,8 @@ class BackupFrame(ttk.Frame):
         self.webdav_client = client
         self.backup_manager = BackupManager(client)
         self._set_enabled(True)
-        self.refresh_backup_list()
+        self._clear_list()
+        self._log("WebDAV已连接；需要查看云端备份时请点击“刷新列表”")
 
     def set_source_path(self, path: str):
         """设置源目录路径"""

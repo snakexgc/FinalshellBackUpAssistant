@@ -1,50 +1,60 @@
-# Finalshell 配置文件备份工具
+# FinalShell 配置备份、同步与解密工具
 
-基于 WebDAV 云端存储的 Finalshell 配置文件备份工具。
+基于 WebDAV 的 FinalShell 配置管理工具。
 
-## 功能特性
+## 功能
 
-- **WebDAV 云端存储** - 支持将备份文件存储到 WebDAV 服务器
-- **本地完整备份** - 完整打包当前配置进行备份
-- **本地/云端优先备份** - 基于已有云端备份，按选定策略合并本地文件
-- **云端恢复** - 从 WebDAV 下载备份并恢复
-- **备份管理** - 查看、删除云端备份文件
-- **连接密码解密** - 选择单个 JSON 或整个 `conn` 文件夹，显示可复制的连接信息和解密后的密码
+- WebDAV 云端备份、恢复和备份文件管理
+- 本地/云端优先的备份及恢复策略
+- `config.json` 与 `conn` 文件夹实时同步
+- 云端基准或本地基准的首次精确镜像
+- 云端同步目录为空时自动使用本地基准
+- 进入监听状态后从工具中启动 FinalShell
+- FinalShell 连接信息与密码解密
+- 保存 WebDAV 和 FinalShell 路径，启动时自动恢复上次设置
 
-## 项目结构
+## 同步规则
 
-```
-FinalshellBackUpAssistant/
-├── main.py                 # 程序入口
-├── requirements.txt        # 依赖列表
-├── core/                   # 核心模块
-│   ├── __init__.py
-│   ├── webdav_client.py    # WebDAV客户端封装
-│   ├── backup_manager.py   # 备份管理逻辑
-│   └── finalshell_decryptor.py # FinalShell密码解密逻辑
-├── ui/                     # 界面模块
-│   ├── __init__.py
-│   ├── main_window.py      # 主窗口
-│   ├── webdav_frame.py     # WebDAV配置面板
-│   ├── backup_frame.py     # 备份操作面板
-│   └── decrypt_frame.py    # 配置解密面板
-└── utils/                  # 工具模块
-    ├── __init__.py
-    └── logger.py           # 日志工具
+同步内容位于 WebDAV 的 `Finalshell_BackUp/sync` 目录：
+
+```text
+Finalshell_BackUp/
+└── sync/
+    ├── config.json
+    └── conn/
 ```
 
-## 备份文件命名规则
+- 云端基准：云端文件覆盖本地同名文件；云端独有文件下载到本地；本地独有文件删除。
+- 本地基准：本地文件覆盖云端同名文件；本地独有文件上传到云端；云端独有文件删除。
+- 若云端没有 `config.json` 和 `conn` 中的文件，即使选择云端基准，也会自动按本地基准初始化。
+- 首次同步完成后监听本地 `config.json` 和 `conn`，本地的新增、修改和删除会实时同步到云端。
 
-- 所有备份：`YYYYMMDDHHMMSS.zip`
+为避免首次同步时 FinalShell 同时写入配置，请先启动同步，界面显示“正在监听”后再点击“启动 FinalShell 程序”。
 
+## 配置保存
 
-### WebDAV 目录结构
+点击 WebDAV 区域中的“保存配置”，程序会在自身同级目录写入
+`FinalshellBackUpAssistant.json`。其中包含 WebDAV 地址、用户名、密码和
+FinalShell 安装路径。配置目前以明文保存，请妥善保管该文件。
 
-备份文件存储在 WebDAV 服务器的 `/Finalshell_BackUp` 目录下。
+旧版同级 `config.json` 仍可读取；新的保存操作只会写入独立设置文件，避免工具放在 FinalShell 安装目录时覆盖 FinalShell 自身的 `config.json`。
 
-## 依赖要求
+## 依赖
 
-- Python 3.8+
-- requests >= 2.28.0
-- webdavclient3 >= 3.14.6
-- tkinter（Python 标准库）
+- Python 3.10+
+- requests >= 2.34.2
+- webdavclient3 >= 3.14.7
+- pycryptodome >= 3.23.0
+- watchdog >= 6.0.0
+
+安装并运行：
+
+```powershell
+pip install -r requirements.txt
+python main.py
+```
+
+## WebDAV 根目录
+
+备份恢复文件和 `sync` 子目录统一放在 WebDAV 的 `Finalshell_BackUp` 目录中。
+所有 WebDAV HTTP 请求的超时时间为 10 秒。

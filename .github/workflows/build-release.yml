@@ -33,7 +33,7 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
-      - name: Create default bundled config
+      - name: Create default config
         shell: pwsh
         run: |
           $config = [ordered]@{
@@ -43,17 +43,21 @@ jobs:
             source_path = "D:/finalshell"
           }
 
-          $config | ConvertTo-Json | Set-Content -Path "config.json" -Encoding utf8
+          $config | ConvertTo-Json | Set-Content -Path "FinalshellBackUpAssistant.json" -Encoding utf8
 
       - name: Build executable
+        shell: pwsh
         run: |
-          pyinstaller --onefile --windowed --name "FinalshellBackUpAssistant" --add-data "config.json;." main.py
+          pyinstaller --onefile --windowed --name "FinalshellBackUpAssistant" main.py
+          Copy-Item "FinalshellBackUpAssistant.json" "dist/FinalshellBackUpAssistant.json"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: FinalshellBackUpAssistant-windows
-          path: dist/FinalshellBackUpAssistant.exe
+          path: |
+            dist/FinalshellBackUpAssistant.exe
+            dist/FinalshellBackUpAssistant.json
 
   release:
     needs: build
@@ -83,13 +87,15 @@ jobs:
             ## FinalshellBackUpAssistant ${{ steps.get_version.outputs.VERSION }}
             
             ### 下载说明
-            - 下载 `FinalshellBackUpAssistant.exe` 文件即可使用
+            - 下载 `FinalshellBackUpAssistant.exe` 和同级默认配置 `FinalshellBackUpAssistant.json`
             - 无需安装 Python 环境
-            - 公开发行版内置坚果云默认地址，用户名和密码为空
+            - 默认配置包含坚果云地址，用户名和密码为空
             
             ### 更新内容
             请查看提交记录了解详细更新内容。
-          files: FinalshellBackUpAssistant.exe
+          files: |
+            FinalshellBackUpAssistant.exe
+            FinalshellBackUpAssistant.json
           draft: false
           prerelease: false
         env:
