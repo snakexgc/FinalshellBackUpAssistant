@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import posixpath
 import shutil
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -21,6 +23,8 @@ from .webdav_client import WebDAVClient
 
 LOCAL_BASELINE = "local"
 CLOUD_BASELINE = "cloud"
+MAX_DOWNLOAD_WORKERS = 8
+LOCAL_ONLY_CONFIG_FIELDS = ("cmd_history", "file_history")
 
 
 @dataclass(frozen=True)
@@ -276,29 +280,30 @@ class SyncManager:
         ):
             self._local_path(relative).mkdir(parents=True, exist_ok=True)
 
-        # 全部下载并原子替换，避免下载失败后留下半个文件。
-        for relative in sorted(remote_files):
-            self._raise_if_stopping()
-            destination = self._local_path(relative)
-            if destination.is_dir():
-                shutil.rmtree(destination)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            file_descriptor, temp_name = tempfile.mkstemp(
-                prefix=".finalshell-sync-", dir=str(destination.parent)
+        # 下载为纯 I/O 操作，最多并发 8 路以缩短启动时的首次同步时间。
+        # 每个文件仍通过独立临时文件原子替换，避免失败后留下半个文件。
+        files_to_download = sorted(remote_files)
+        if files_to_download:
+            worker_count = min(MAX_DOWNLOAD_WORKERS, len(files_to_download))
+            self._log(
+                f"正在并发拉取 {len(files_to_download)} 个文件"
+                f"（{worker_count} 线程）..."
             )
-            os.close(file_descriptor)
-            temp_path = Path(temp_name)
-            try:
-                success, message = self.webdav.download_path(
-                    self._remote_path(relative), str(temp_path)
-                )
-                self._require_success(success, message)
-                os.replace(temp_path, destination)
-            finally:
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="FinalShellPull",
+            ) as executor:
+                futures = {
+                    executor.submit(self._download_remote_file, relative): relative
+                    for relative in files_to_download
+                }
                 try:
-                    temp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                    for future in as_completed(futures):
+                        future.result()
+                except Exception:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
 
         for relative in sorted(set(local.files) - set(remote_files)):
             self._raise_if_stopping()
@@ -362,7 +367,7 @@ class SyncManager:
         directories = {"conn"}
         config_path = self.source_path / "config.json"
         if config_path.is_file() and not config_path.is_symlink():
-            files["config.json"] = self._file_digest(config_path)
+            files["config.json"] = self._config_digest(config_path)
 
         conn_path = self.source_path / "conn"
         if conn_path.is_dir():
@@ -401,6 +406,118 @@ class SyncManager:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    @classmethod
+    def _config_digest(cls, config_path: Path) -> str:
+        """忽略本地历史字段后计算 config.json 的摘要。"""
+        try:
+            content = cls._sanitized_config_bytes(config_path)
+        except RuntimeError:
+            # FinalShell 可能正在分段写文件。保留原始摘要使后续
+            # 完整内容仍能被检测到，但上传端不会上传无效 JSON。
+            return cls._file_digest(config_path)
+        return hashlib.sha256(content).hexdigest()
+
+    @staticmethod
+    def _sanitized_config_bytes(config_path: Path) -> bytes:
+        """返回可上传的 config.json，并强制清空本地历史字段。"""
+        config_data = SyncManager._read_config_object(config_path)
+        for field_name in LOCAL_ONLY_CONFIG_FIELDS:
+            config_data[field_name] = []
+        return SyncManager._serialize_config(config_data)
+
+    @staticmethod
+    def _read_config_object(config_path: Path) -> dict:
+        """读取并验证 config.json 根节点。"""
+        try:
+            with config_path.open("r", encoding="utf-8-sig") as config_stream:
+                config_data = json.load(config_stream)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RuntimeError(f"读取 config.json 失败: {error}") from error
+
+        if not isinstance(config_data, dict):
+            raise RuntimeError("config.json 的根节点必须是 JSON 对象")
+        return config_data
+
+    @staticmethod
+    def _serialize_config(config_data: dict) -> bytes:
+        serialized = json.dumps(config_data, ensure_ascii=False, indent=4)
+        return f"{serialized}\n".encode("utf-8")
+
+    @classmethod
+    def _read_local_history_fields(cls, config_path: Path) -> dict[str, list]:
+        """读取不参与同步的本地历史字段。"""
+        try:
+            config_data = cls._read_config_object(config_path)
+        except RuntimeError:
+            return {field_name: [] for field_name in LOCAL_ONLY_CONFIG_FIELDS}
+        local_history = {}
+        for field_name in LOCAL_ONLY_CONFIG_FIELDS:
+            value = config_data.get(field_name)
+            local_history[field_name] = value if isinstance(value, list) else []
+        return local_history
+
+    @classmethod
+    def _write_config_with_local_history(
+        cls,
+        source: Path,
+        destination: Path,
+        local_history: dict[str, list],
+    ) -> None:
+        config_data = cls._read_config_object(source)
+        for field_name in LOCAL_ONLY_CONFIG_FIELDS:
+            config_data[field_name] = local_history.get(field_name, [])
+        cls._write_bytes(destination, cls._serialize_config(config_data))
+
+    @classmethod
+    def _write_sanitized_config(cls, source: Path, destination: Path) -> None:
+        cls._write_bytes(destination, cls._sanitized_config_bytes(source))
+
+    @staticmethod
+    def _write_bytes(destination: Path, content: bytes) -> None:
+        with destination.open("wb") as config_stream:
+            config_stream.write(content)
+            config_stream.flush()
+            os.fsync(config_stream.fileno())
+
+    def _download_remote_file(self, relative_path: str) -> None:
+        """下载单个文件并原子替换本地目标。"""
+        self._raise_if_stopping()
+        destination = self._local_path(relative_path)
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=".finalshell-sync-", dir=str(destination.parent)
+        )
+        os.close(file_descriptor)
+        temp_path = Path(temp_name)
+        try:
+            success, message = self.webdav.download_path(
+                self._remote_path(relative_path), str(temp_path)
+            )
+            self._require_success(success, message)
+            self._raise_if_stopping()
+
+            if relative_path == "config.json":
+                local_history = self._read_local_history_fields(destination)
+                self._write_sanitized_config(temp_path, temp_path)
+                # 云端为基准时也要清理旧备份中的历史字段。
+                success, message = self.webdav.upload_path(
+                    str(temp_path), self._remote_path(relative_path)
+                )
+                self._require_success(success, message)
+                # 本地历史不参与双向同步，拉取后仍保留本地内容。
+                self._write_config_with_local_history(
+                    temp_path, temp_path, local_history
+                )
+
+            os.replace(temp_path, destination)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _read_remote_tree(self) -> tuple[dict[str, dict], set[str]]:
         success, message, files, directories = self.webdav.list_remote_tree(
             self.remote_root
@@ -431,10 +548,28 @@ class SyncManager:
         self._require_success(success, message)
 
     def _upload(self, local_path: Path, relative_path: str) -> None:
-        success, message = self.webdav.upload_path(
-            str(local_path), self._remote_path(relative_path)
-        )
-        self._require_success(success, message)
+        upload_path = local_path
+        temp_path: Optional[Path] = None
+        try:
+            if relative_path == "config.json":
+                file_descriptor, temp_name = tempfile.mkstemp(
+                    prefix=".finalshell-config-", suffix=".json"
+                )
+                os.close(file_descriptor)
+                temp_path = Path(temp_name)
+                self._write_sanitized_config(local_path, temp_path)
+                upload_path = temp_path
+
+            success, message = self.webdav.upload_path(
+                str(upload_path), self._remote_path(relative_path)
+            )
+            self._require_success(success, message)
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _delete_remote(self, relative_path: str) -> None:
         success, message = self.webdav.delete_path(

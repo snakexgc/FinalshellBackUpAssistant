@@ -1,5 +1,7 @@
+import json
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -13,6 +15,7 @@ class FakeWebDAV:
 
     def __init__(self, root: Path):
         self.root = root
+        self.uploaded_paths = []
 
     def _path(self, remote_path: str) -> Path:
         parts = Path(remote_path.replace("\\", "/")).parts
@@ -39,6 +42,7 @@ class FakeWebDAV:
         destination = self._path(remote_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local_path, destination)
+        self.uploaded_paths.append(remote_path)
         return True, "ok"
 
     def download_path(self, remote_path: str, local_path: str):
@@ -56,6 +60,27 @@ class FakeWebDAV:
         return True, "ok"
 
 
+class ConcurrentFakeWebDAV(FakeWebDAV):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self._activity_lock = threading.Lock()
+        self.active_downloads = 0
+        self.max_active_downloads = 0
+
+    def download_path(self, remote_path: str, local_path: str):
+        with self._activity_lock:
+            self.active_downloads += 1
+            self.max_active_downloads = max(
+                self.max_active_downloads, self.active_downloads
+            )
+        try:
+            time.sleep(0.05)
+            return super().download_path(remote_path, local_path)
+        finally:
+            with self._activity_lock:
+                self.active_downloads -= 1
+
+
 class SyncManagerTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -65,7 +90,14 @@ class SyncManagerTests(unittest.TestCase):
         self.local.mkdir()
         self.remote.mkdir()
         (self.local / "finalshell.exe").write_bytes(b"exe")
-        (self.local / "config.json").write_text("local-config", encoding="utf-8")
+        self._write_json(
+            self.local / "config.json",
+            {
+                "theme": "local",
+                "cmd_history": [{"text": "local secret command"}],
+                "file_history": [{"path": "D:/local/secret.txt"}],
+            },
+        )
         (self.local / "conn").mkdir()
         (self.local / "conn" / "local.json").write_text(
             "local-connection", encoding="utf-8"
@@ -81,10 +113,22 @@ class SyncManagerTests(unittest.TestCase):
     def remote_sync_path(self) -> Path:
         return self.remote / "Finalshell_BackUp" / "sync"
 
+    @staticmethod
+    def _write_json(path: Path, content: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(content, ensure_ascii=False, indent=4) + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _read_json(path: Path) -> dict:
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def test_local_baseline_exactly_replaces_cloud(self):
         cloud = self.remote_sync_path()
         (cloud / "conn").mkdir(parents=True)
-        (cloud / "config.json").write_text("old-cloud", encoding="utf-8")
+        self._write_json(cloud / "config.json", {"theme": "old-cloud"})
         (cloud / "conn" / "remote-only.json").write_text(
             "remove-me", encoding="utf-8"
         )
@@ -92,8 +136,17 @@ class SyncManagerTests(unittest.TestCase):
         actual = self.manager._perform_initial_sync(LOCAL_BASELINE)
 
         self.assertEqual(LOCAL_BASELINE, actual)
+        cloud_config = self._read_json(cloud / "config.json")
+        self.assertEqual("local", cloud_config["theme"])
+        self.assertEqual([], cloud_config["cmd_history"])
+        self.assertEqual([], cloud_config["file_history"])
         self.assertEqual(
-            "local-config", (cloud / "config.json").read_text(encoding="utf-8")
+            [{"text": "local secret command"}],
+            self._read_json(self.local / "config.json")["cmd_history"],
+        )
+        self.assertEqual(
+            [{"path": "D:/local/secret.txt"}],
+            self._read_json(self.local / "config.json")["file_history"],
         )
         self.assertEqual(
             "local-connection",
@@ -104,7 +157,14 @@ class SyncManagerTests(unittest.TestCase):
     def test_cloud_baseline_exactly_replaces_local(self):
         cloud = self.remote_sync_path()
         (cloud / "conn" / "nested").mkdir(parents=True)
-        (cloud / "config.json").write_text("cloud-config", encoding="utf-8")
+        self._write_json(
+            cloud / "config.json",
+            {
+                "theme": "cloud",
+                "cmd_history": [{"text": "cloud secret command"}],
+                "file_history": [{"path": "/cloud/secret.txt"}],
+            },
+        )
         (cloud / "conn" / "cloud.json").write_text(
             "cloud-connection", encoding="utf-8"
         )
@@ -112,9 +172,19 @@ class SyncManagerTests(unittest.TestCase):
         actual = self.manager._perform_initial_sync(CLOUD_BASELINE)
 
         self.assertEqual(CLOUD_BASELINE, actual)
+        local_config = self._read_json(self.local / "config.json")
+        self.assertEqual("cloud", local_config["theme"])
         self.assertEqual(
-            "cloud-config",
-            (self.local / "config.json").read_text(encoding="utf-8"),
+            [{"text": "local secret command"}], local_config["cmd_history"]
+        )
+        self.assertEqual(
+            [{"path": "D:/local/secret.txt"}], local_config["file_history"]
+        )
+        self.assertEqual(
+            [], self._read_json(cloud / "config.json")["cmd_history"]
+        )
+        self.assertEqual(
+            [], self._read_json(cloud / "config.json")["file_history"]
         )
         self.assertEqual(
             "cloud-connection",
@@ -128,10 +198,98 @@ class SyncManagerTests(unittest.TestCase):
         actual = self.manager._perform_initial_sync(CLOUD_BASELINE)
 
         self.assertEqual(LOCAL_BASELINE, actual)
+        cloud_config = self._read_json(self.remote_sync_path() / "config.json")
+        self.assertEqual("local", cloud_config["theme"])
+        self.assertEqual([], cloud_config["cmd_history"])
+        self.assertEqual([], cloud_config["file_history"])
+
+    def test_config_history_only_change_is_not_uploaded(self):
+        self.manager._perform_initial_sync(LOCAL_BASELINE)
+        self.manager._snapshot = self.manager._build_local_snapshot()
+        uploads_before_change = len(self.webdav.uploaded_paths)
+
+        config_path = self.local / "config.json"
+        config = self._read_json(config_path)
+        config["cmd_history"] = [
+            {
+                "active_time": 1785738492566,
+                "index": 0,
+                "text": "bash <(curl -Ls https://example.test/install.sh)",
+                "type": "",
+            }
+        ]
+        config["file_history"] = [{"path": "D:/changed/only-history.txt"}]
+        self._write_json(config_path, config)
+        self.manager.sync_local_changes()
+
+        self.assertEqual(uploads_before_change, len(self.webdav.uploaded_paths))
         self.assertEqual(
-            "local-config",
-            (self.remote_sync_path() / "config.json").read_text(encoding="utf-8"),
+            [], self._read_json(self.remote_sync_path() / "config.json")["cmd_history"]
         )
+        self.assertEqual(
+            [], self._read_json(self.remote_sync_path() / "config.json")["file_history"]
+        )
+
+    def test_other_config_change_uploads_with_empty_history(self):
+        self.manager._perform_initial_sync(LOCAL_BASELINE)
+        self.manager._snapshot = self.manager._build_local_snapshot()
+        uploads_before_change = len(self.webdav.uploaded_paths)
+
+        config_path = self.local / "config.json"
+        config = self._read_json(config_path)
+        config["theme"] = "changed"
+        config["cmd_history"] = [{"text": "must not reach cloud"}]
+        config["file_history"] = [{"path": "must-not-reach-cloud"}]
+        self._write_json(config_path, config)
+        self.manager.sync_local_changes()
+
+        self.assertEqual(uploads_before_change + 1, len(self.webdav.uploaded_paths))
+        cloud_config = self._read_json(self.remote_sync_path() / "config.json")
+        self.assertEqual("changed", cloud_config["theme"])
+        self.assertEqual([], cloud_config["cmd_history"])
+        self.assertEqual([], cloud_config["file_history"])
+        self.assertEqual(
+            [{"text": "must not reach cloud"}],
+            self._read_json(config_path)["cmd_history"],
+        )
+        self.assertEqual(
+            [{"path": "must-not-reach-cloud"}],
+            self._read_json(config_path)["file_history"],
+        )
+
+    def test_upload_adds_missing_history_field(self):
+        self._write_json(self.local / "config.json", {"theme": "without-history"})
+
+        self.manager._perform_initial_sync(LOCAL_BASELINE)
+
+        self.assertEqual(
+            [], self._read_json(self.remote_sync_path() / "config.json")["cmd_history"]
+        )
+        self.assertEqual(
+            [], self._read_json(self.remote_sync_path() / "config.json")["file_history"]
+        )
+
+    def test_cloud_files_are_downloaded_concurrently_with_eight_thread_limit(self):
+        cloud = self.remote_sync_path()
+        self._write_json(cloud / "config.json", {"theme": "cloud"})
+        for index in range(16):
+            target = cloud / "conn" / f"connection-{index}.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(index), encoding="utf-8")
+
+        concurrent_webdav = ConcurrentFakeWebDAV(self.remote)
+        self.manager.webdav = concurrent_webdav
+        self.manager._perform_initial_sync(CLOUD_BASELINE)
+
+        self.assertGreater(concurrent_webdav.max_active_downloads, 1)
+        self.assertLessEqual(concurrent_webdav.max_active_downloads, 8)
+        for index in range(16):
+            self.assertEqual(
+                str(index),
+                (self.local / "conn" / f"connection-{index}.json").read_text(
+                    encoding="utf-8"
+                ),
+            )
 
     def test_cloud_baseline_handles_file_directory_type_changes(self):
         local_file = self.local / "conn" / "local.json"

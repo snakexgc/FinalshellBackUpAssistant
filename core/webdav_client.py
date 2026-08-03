@@ -5,6 +5,7 @@ WebDAV客户端模块 - 使用 webdavclient3 库封装WebDAV操作
 import os
 import logging
 import posixpath
+import threading
 from pathlib import PurePosixPath
 from typing import Optional, Callable
 from webdav3.client import Client
@@ -34,6 +35,8 @@ class WebDAVClient:
         self.remote_path = "Finalshell_BackUp"
         self.sync_remote_path = f"{self.remote_path}/sync"
         self.client: Optional[Client] = None
+        self._client_options: Optional[dict] = None
+        self._download_clients = threading.local()
         self.log_callback = log_callback
         self._known_directories: set[str] = set()
         # 缓存文件列表（用于不支持 list 方法的 WebDAV）
@@ -100,6 +103,7 @@ class WebDAVClient:
                 'webdav_timeout': self.TIMEOUT_SECONDS,
             }
 
+            self._client_options = options.copy()
             self.client = Client(options)
 
             self._log("验证连接...")
@@ -246,13 +250,29 @@ class WebDAVClient:
 
         try:
             normalized = self._normalize_remote_path(remote_path)
-            self.client.download_sync(remote_path=normalized, local_path=local_path)
+            # requests.Session 不保证多线程共享安全。每个拉取线程
+            # 复用自己的 WebDAV Client，既隔离 Session 又保留连接池。
+            download_client = self._get_download_client()
+            download_client.download_sync(
+                remote_path=normalized, local_path=local_path
+            )
             self._log(f"同步下载成功: {normalized}")
             return True, "下载成功"
         except Exception as error:
             message = f"同步下载失败: {self._parse_error(error)}"
             self._log(message, "error")
             return False, message
+
+    def _get_download_client(self) -> Client:
+        """获取当前线程专用的下载客户端。"""
+        download_client = getattr(self._download_clients, "client", None)
+        if download_client is None:
+            if self._client_options is None:
+                # 兼容测试或外部直接注入 client 的用法。
+                return self.client
+            download_client = Client(self._client_options.copy())
+            self._download_clients.client = download_client
+        return download_client
 
     def delete_path(self, remote_path: str) -> tuple[bool, str]:
         """删除指定远程文件或目录。"""
